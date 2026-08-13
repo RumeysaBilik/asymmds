@@ -1,56 +1,89 @@
 """
 randers_bridge.py
 ==================
-[Ported from the FinslerMDS repo's utils.py::compute_dist_matrix -- logic
-unchanged, stripped to just this one routine so it has no dependency on the
-rest of that repo (Isomap wrapper, plotting helpers, etc).]
-
 Converts a raw point cloud X (n, m) plus a per-point Randers drift field
 omega (n, m) into a full (n, n) asymmetric geodesic distance matrix D_asym,
 suitable as direct input to randers_umap_fit() -- exactly the role that
 load_migration_graph()'s D_asym plays for the migration dataset.
 
+[OURS 2026-08-11] Adjacency construction rewritten to match
+github.com/lwileczek/isomap's make_adjacency() (README "Step 1 Adjacency &
+Distance Matrices", threshold variant) instead of sklearn's kneighbors_graph:
+
+    dist = cdist(X, X)                     # full (n,n) pairwise distance
+    adj  = inf everywhere
+    adj[dist < eps] = dist[dist < eps]      # threshold, not k-NN membership
+    D    = shortest_path(adj)
+
+i.e. two points are an edge iff their Euclidean distance is below a
+threshold `eps`, not iff one is among the other's k nearest neighbours.
+Function name/signature kept as compute_dist_matrix() and n_neighbors kept
+as the public knob (every caller in this repo passes n_neighbors=k) -- eps
+is auto-derived from n_neighbors so nothing downstream has to change: eps
+is set to the smallest radius such that every point has >= n_neighbors
+neighbours within it (max, over all i, of point i's n_neighbors-th nearest
+distance). Pass eps explicitly to bypass that and use lwileczek's raw
+threshold knob directly.
+
 Construction
 ------------
-    1. Euclidean k-NN graph on X (sklearn kneighbors_graph).
-    2. For every graph edge (i, j):
+    1. Full pairwise Euclidean distance (scipy cdist), thresholded at eps
+       -> adjacency matrix (lwileczek/isomap's method, not sklearn's k-NN
+       graph).
+    2. For every surviving edge (i, j):
            d(i, j) <- d(i, j) + <omega_i, x_j - x_i>
        (Randers-perturbed edge weight -- the discrete version of the
-       continuous Randers metric F(x, v) = ||v|| + <omega_x, v>.)
-    3. Directed shortest-path (Dijkstra, via scipy's shortest_path) over the
-       resulting asymmetric weighted graph:
+       continuous Randers metric F(x, v) = ||v|| + <omega_x, v>. This step
+       has no counterpart in lwileczek/isomap -- it's the Finsler/Randers
+       extension specific to this project.)
+    3. Directed shortest-path (Dijkstra, via scipy's shortest_path -- the
+       modern equivalent of the old sklearn.utils.graph_shortest_path that
+       lwileczek/isomap's own code calls) over the resulting asymmetric
+       weighted graph:
            D_asym[i, j] = geodesic distance i -> j,   in general != D_asym[j, i]
 """
 
 import numpy as np
+from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components, shortest_path
-from sklearn.neighbors import NearestNeighbors, kneighbors_graph, radius_neighbors_graph
-from sklearn.utils.graph import _fix_connected_components
+from scipy.spatial.distance import cdist
 
 
 def compute_dist_matrix(
         X,
         n_neighbors=5,
-        radius=None,
+        eps=None,
         path_method="auto",
-        neighbors_algorithm="auto",
-        n_jobs=None,
-        metric="minkowski",
-        p=2,
-        metric_params=None,
+        metric="euclidean",
         randers_field=None,
+        directed=None,
 ):
     """
     Parameters
     ----------
     X             : (n, m) raw coordinates
-    n_neighbors   : k for the Euclidean k-NN graph that forms the geodesic
-                    backbone (this is independent of randers_umap_fit's own
-                    n_neighbors, which builds a *second*, UMAP-style fuzzy
-                    graph on top of the D_asym this function returns)
+    n_neighbors   : used only to auto-derive eps when eps=None (see module
+                    docstring) -- kept for call-site compatibility with the
+                    rest of this repo, which all pass n_neighbors=k. This
+                    is independent of randers_umap_fit's own n_neighbors,
+                    which builds a *second*, UMAP-style fuzzy graph on top
+                    of the D_asym this function returns.
+    eps           : [OURS] lwileczek/isomap's actual threshold knob -- two
+                    points are connected iff their Euclidean distance is
+                    < eps. None (default) auto-derives eps from n_neighbors
+                    so every point ends up with >= n_neighbors neighbours.
+                    Pass a float to control the threshold directly instead.
     randers_field : (n, m) per-point drift vector omega_i (e.g. the `omega`
                     array from generated_swiss_roll-2.py), or None for the
-                    plain symmetric Isomap-style geodesic distance
+                    plain Isomap-style geodesic distance
+    directed      : bool or None. None (default): directed shortest-path
+                    iff randers_field is given, undirected (symmetric
+                    result) otherwise -- same semantics as before. Note the
+                    eps-threshold adjacency (unlike sklearn's k-NN graph)
+                    is symmetric by construction (dist(i,j)==dist(j,i)), so
+                    with directed=True and randers_field=None there is no
+                    longer any k-NN-membership asymmetry to isolate -- the
+                    graph is symmetric until the Randers step perturbs it.
     path_method   : passed to scipy.sparse.csgraph.shortest_path
 
     Returns
@@ -58,47 +91,58 @@ def compute_dist_matrix(
     dist_matrix_ : (n, n) dense ndarray -- this is D_asym
     preds_       : (n, n) shortest-path predecessor matrix
     """
-    nbrs_ = NearestNeighbors(
-        n_neighbors=n_neighbors, radius=radius, algorithm=neighbors_algorithm,
-        metric=metric, p=p, metric_params=metric_params, n_jobs=n_jobs,
-    )
-    nbrs_.fit(X)
+    n = X.shape[0]
+    dist = cdist(X, X, metric=metric)
+    np.fill_diagonal(dist, np.inf)  # exclude self so eps auto-derivation below ignores it
 
-    if n_neighbors is not None:
-        nbg = kneighbors_graph(
-            nbrs_, n_neighbors, metric=metric, p=p,
-            metric_params=metric_params, mode="distance", n_jobs=n_jobs,
-        )
+    if eps is None:
+        # smallest per-point n_neighbors-th nearest distance, maxed over
+        # all points -- guarantees every node has >= n_neighbors neighbours
+        # within the threshold (this is lwileczek/isomap's own suggestion:
+        # "tune your threshold so that each node has some minimum number
+        # of connections").
+        kth = np.sort(dist, axis=1)[:, n_neighbors - 1]
+        eps_ = kth.max()
     else:
-        nbg = radius_neighbors_graph(
-            nbrs_, radius=radius, metric=metric, p=p,
-            metric_params=metric_params, mode="distance", n_jobs=n_jobs,
-        )
+        eps_ = eps
 
-    # Make sure the graph is connected (same fix Isomap itself applies)
-    n_connected_components, labels = connected_components(nbg)
-    if n_connected_components > 1:
-        nbg = _fix_connected_components(
-            X=nbrs_._fit_X, graph=nbg, n_connected_components=n_connected_components,
-            component_labels=labels, mode="distance", metric=nbrs_.effective_metric_,
-            **nbrs_.effective_metric_params_,
-        )
+    def _sparse_from_threshold(eps_val):
+        # bln[i, j] True iff dist(i, j) < eps_val -- lwileczek/isomap's
+        # edge rule. Only True entries are stored (true sparsity, unlike
+        # a dense inf-filled array), matching what kneighbors_graph gave
+        # us before.
+        bln_ = dist < eps_val
+        rows, cols = np.nonzero(bln_)
+        vals = dist[rows, cols]
+        return csr_matrix((vals, (rows, cols)), shape=(n, n)), bln_
 
-    # ── the actual Randers injection ────────────────────────────────────────
+    nbg, bln = _sparse_from_threshold(eps_)
+
+    # [OURS] connectivity safety net -- lwileczek/isomap's own code has no
+    # fallback for a disconnected graph (shortest_path just leaves
+    # unreachable pairs at inf). We widen eps until connected, since a
+    # graph full of infs breaks every downstream step (SVD, Adam loss,
+    # UMAP fuzzy graph) rather than just degrading gracefully.
+    n_components, _ = connected_components(nbg)
+    while n_components > 1:
+        eps_ *= 1.5
+        nbg, bln = _sparse_from_threshold(eps_)
+        n_components, _ = connected_components(nbg)
+
+    # ── the actual Randers injection (no counterpart in lwileczek/isomap) ──
     if randers_field is not None:
-        edges_mask = nbg.toarray() != 0
-        for i in range(len(X)):
-            randers_update = np.dot(X - X[i], randers_field[i]) * edges_mask[i]
-            nbg[i, edges_mask[i]] = nbg[i, edges_mask[i]] + randers_update[edges_mask[i]]
-        nbg = nbg.tocsr()
-        directed = True
+        rows, cols = np.nonzero(bln)
+        randers_update = np.einsum("ij,ij->i", X[cols] - X[rows], randers_field[rows])
+        vals = dist[rows, cols] + randers_update
+        nbg = csr_matrix((vals, (rows, cols)), shape=(n, n))
+        directed_ = True if directed is None else directed
     else:
-        directed = False
+        directed_ = False if directed is None else directed
 
-    dist_matrix_, preds_ = shortest_path(nbg, method=path_method, directed=directed,
+    dist_matrix_, preds_ = shortest_path(nbg, method=path_method, directed=directed_,
                                           return_predecessors=True)
 
-    if nbrs_._fit_X.dtype == np.float32:
-        dist_matrix_ = dist_matrix_.astype(nbrs_._fit_X.dtype, copy=False)
+    if X.dtype == np.float32:
+        dist_matrix_ = dist_matrix_.astype(X.dtype, copy=False)
 
     return dist_matrix_, preds_

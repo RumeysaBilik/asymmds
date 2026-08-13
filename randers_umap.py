@@ -149,14 +149,14 @@ def fuzzy_simplicial_set(D: np.ndarray, k: int):
         w = np.exp(-np.maximum(0.0, knn_dist[i] - rho[i]) / sigma[i])
         A[i, knn_idx[i]] = w
 
-    mu = A + A.T - A * A.T   # probabilistic t-conorm  [UMAP Eq. Section 3.1]
-    np.fill_diagonal(mu, 0.0)
+    #mu = A + A.T - A * A.T   # probabilistic t-conorm  [UMAP Eq. Section 3.1]
+    #np.fill_diagonal(mu, 0.0)
 
     knn_mask = np.zeros((n, n), dtype=bool)
     rows = np.repeat(np.arange(n), k)
     knn_mask[rows, knn_idx.ravel()] = True
 
-    return mu, knn_mask
+    return A, knn_mask
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -255,6 +255,11 @@ def randers_umap_fit(
     B_fixed: np.ndarray = None,
     force_edges: np.ndarray = None,
     Y_init_override: np.ndarray = None,
+    use_gravity: bool = False,
+    node_mass: np.ndarray = None,
+    norm_mode: str = "relative",
+    ramp: bool = True,
+    snapshot_every: int = None,
     seed: int = 0,
     verbose: bool = True,
 ) -> dict:
@@ -306,6 +311,30 @@ def randers_umap_fit(
         force-directed loop only has to find the right LOCAL offset, not
         travel cross-embedding first.
 
+    use_gravity : [OURS 2026-08-06] bool, default False (disabled, reproduces
+        prior behaviour exactly). If True, an extra SEPARATE additive force
+        pulls each node i toward its own per-node target xi_i = y_i + b_i
+        (Bannister et al.'s social-gravity force, arXiv:1209.0748, adapted to a
+        per-node target instead of one shared center). Since xi_i - y_i = b_i
+        by construction, this force IS M[i] * b_i -- no extra tuned scalar
+        multiplies it (deliberately: the whole point of the located-drift
+        construction is that b_i's magnitude is already meaningful, not a free
+        parameter to guess). Added to the net UMAP force each epoch (before
+        grad_clip). Does not change how rho/g/B are computed above -- B is a
+        fixed source for this term, no gradient flows back onto B from it.
+        This idea (a per-node gravity pull equal to the node's own drift
+        vector) was previously tried on finsler_mds.py's free-B model with an
+        extra tuned gamma multiplier (see Gravity_Report.tex): once that
+        model's B-init bug was fixed, no gamma>0 showed a measurable benefit
+        over the gamma=0 baseline. Being tried again here, without the gamma
+        knob, because this is a structurally different force basis (UMAP's
+        Phi-curve vs. plain Adam-optimised distance-fit loss) -- the earlier
+        null result is not assumed to carry over automatically.
+
+    node_mass : [OURS 2026-08-06] (n,) per-node mass M[i], used only if
+        use_gravity=True. None (default) uses M[i]=1 for all nodes (uniform),
+        i.e. the gravity force is then exactly b_i, unscaled.
+
     drift_mode : "knn" (adopted, report's verdict) -- b_i = (1/k) sum over
                  j in N_k(i) only, i.e. same k restricted neighbour set
                  used for the UMAP graph itself. Report Table 1: mean||b||
@@ -347,7 +376,33 @@ def randers_umap_fit(
         mu[fj, fi] = 1.0
         np.fill_diagonal(mu, 0.0)
     a, b_param = find_ab_params(spread=spread, min_dist=min_dist)
-    N = 0.5 * (D_asym - D_asym.T)          # frozen asymmetric weighting [OURS]
+    # [OURS 2026-08-10] norm_mode -- how N's raw units get removed before
+    # it drives the drift sum. Ported from isomap_randers_umap.py (see
+    # that file's docstring, "normalise_N" switch): "raw" (default, our
+    # original behaviour) leaves N in D_asym's own units, which can
+    # saturate/need heavy clipping if D isn't already ~[0,1]. "relative"
+    # is dimensionless PER PAIR and bounded (|N|<=1 by construction), so
+    # ||b_i||<=1 holds without clipping ever doing real work.
+    if norm_mode == "relative":
+        N = (D_asym - D_asym.T) / (D_asym + D_asym.T + 1e-12)
+    elif norm_mode == "rowmax":
+        Dr = D_asym.copy(); np.fill_diagonal(Dr, 0.0)
+        Dr = Dr / np.maximum(Dr.max(axis=1, keepdims=True), 1e-12)
+        N = 0.5 * (Dr - Dr.T)
+    elif norm_mode == "maxabs":
+        N = 0.5 * (D_asym - D_asym.T)
+        N = N / max(np.abs(N).max(), 1e-12)
+    elif norm_mode == "raw":
+        N = 0.5 * (D_asym - D_asym.T)          # frozen asymmetric weighting [OURS]
+    else:
+        raise ValueError("norm_mode must be 'raw', 'relative', 'rowmax' or 'maxabs'")
+    # [OURS 2026-08-07] D_asym is not guaranteed dense (e.g. a sparse,
+    # pre-Dijkstra isumap data_D reconstruction has ~k defined entries per
+    # row, the rest np.inf): inf-inf=nan and finite-inf=+-inf can appear in
+    # N wherever a pair's distance is only known in one direction or
+    # neither. Undefined pairs carry no directional information, so they
+    # contribute nothing to the drift sum -- 0, not nan/inf.
+    N = np.where(np.isfinite(N), N, 0.0)
 
     if drift_mode == "knn":
         drift_mask = knn_mask
@@ -363,7 +418,16 @@ def randers_umap_fit(
     Y_init = Y.copy()
 
     B = np.zeros((n, d)) if B_fixed is None else np.asarray(B_fixed, dtype=np.float64).copy()
+    M = np.ones(n) if node_mass is None else np.asarray(node_mass, dtype=np.float64)
     eps = 1e-8
+
+    # [OURS 2026-08-11] snapshot capture -- mirrors finsler_mds_joint.py's
+    # snapshot_every: records the embedding every N epochs so the whole
+    # training trajectory (init -> ... -> final) can be plotted side by
+    # side. epoch 0 entry is Y_init itself (pre-training).
+    snapshots = []
+    if snapshot_every is not None:
+        snapshots.append({"epoch": 0, "Y": Y_init.copy(), "B": B.copy()})
     history = []
 
     # [OURS] expectation-matching correction for going dense instead of
@@ -376,15 +440,28 @@ def randers_umap_fit(
 
     if verbose:
         mode_str = "B_fixed (frozen)" if B_fixed is not None else f"use_drift={use_drift}"
-        print(f"\n-- Randers-UMAP (Part A)  n={n} d={d} k={n_neighbors}  {mode_str} --")
+        grav_str = "  +gravity(=b_i)" if use_gravity else ""
+        print(f"\n-- Randers-UMAP (Part A)  n={n} d={d} k={n_neighbors}  {mode_str}{grav_str} --")
         print(f"   a={a:.4f} b={b_param:.4f}  (min_dist={min_dist}, spread={spread})")
 
     for epoch in range(n_epochs):
-        if B_fixed is None and use_drift:
-            B = compute_drift(N, drift_mask, n_neighbors, Y, clip_delta=clip_delta)
-        # else: B_fixed given -> B stays exactly as initialised, never
-        # recomputed (rigidly attached, see B_fixed docstring above); or
-        # use_drift=False -> B stays all-zeros -> rho=d, g=e -> vanilla UMAP
+        # [OURS 2026-08-10] ramp -- ported from isomap_randers_umap.py:
+        # hold drift off for the first 30% of epochs (pure vanilla-UMAP
+        # forces, lets the topology untangle from init before any
+        # asymmetric pull), linearly ramp 0->1 over the next 40%, full
+        # strength for the last 30%. s=1.0 always when ramp=False
+        # (reproduces prior behaviour exactly).
+        if ramp:
+            t_prog = epoch / max(n_epochs - 1, 1)
+            s = 0.0 if t_prog <= 0.30 else (1.0 if t_prog >= 0.70 else (t_prog - 0.30) / 0.40)
+        else:
+            s = 1.0
+
+        if B_fixed is not None:
+            B = s * np.asarray(B_fixed, dtype=np.float64)
+        elif use_drift:
+            B = s * compute_drift(N, drift_mask, n_neighbors, Y, clip_delta=clip_delta)
+        # else: use_drift=False -> B stays all-zeros -> rho=d, g=e -> vanilla UMAP
 
         diff = Y[np.newaxis, :, :] - Y[:, np.newaxis, :]     # (n,n,d) y_j-y_i
         d_mat = np.maximum(np.sqrt((diff ** 2).sum(-1)), eps)
@@ -408,11 +485,25 @@ def randers_umap_fit(
                 np.fill_diagonal(force[:, :, dd], 0.0)
 
         step = force.sum(axis=1)                              # (n,d) net force on y_i
+
+        # [OURS 2026-08-06] per-node gravity -- separate additive force, ported
+        # from finsler_mds.py's gravity experiment (Gravity_Report.tex), but
+        # WITHOUT that experiment's extra tuned gamma multiplier: the force is
+        # exactly M[i]*b_i, b_i's own magnitude carries the strength. Pulls
+        # y_i toward xi_i = y_i + b_i; since xi_i - y_i = b_i by construction,
+        # this collapses to M[i] * b_i. Does NOT touch rho/g/B above -- B is a
+        # fixed source for this term (no gradient flows back onto B).
+        if use_gravity:
+            step = step + M[:, np.newaxis] * B
+
         step = np.clip(step, -grad_clip, grad_clip)
 
         # decaying learning rate, mirrors UMAP's "slowly decreasing forces"
         cur_lr = lr * (1.0 - epoch / n_epochs)
         Y = Y + cur_lr * step
+
+        if snapshot_every is not None and (epoch + 1) % snapshot_every == 0:
+            snapshots.append({"epoch": epoch + 1, "Y": Y.copy(), "B": B.copy()})
 
         if verbose and epoch % 100 == 0:
             resid = float(np.abs(rho - d_mat).mean())
@@ -426,10 +517,16 @@ def randers_umap_fit(
         B = compute_drift(N, drift_mask, n_neighbors, Y, clip_delta=clip_delta)
     # else B_fixed: leave B exactly as given -- it was never touched by the loop
 
-    return {
+    if snapshot_every is not None and snapshots[-1]["epoch"] != n_epochs:
+        snapshots.append({"epoch": n_epochs, "Y": Y.copy(), "B": B.copy()})
+
+    result = {
         "Y": Y, "Y_init": Y_init, "B": B, "mu": mu, "knn_mask": knn_mask,
         "N": N, "a": a, "b_param": b_param, "history": history,
     }
+    if snapshot_every is not None:
+        result["snapshots"] = snapshots
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
