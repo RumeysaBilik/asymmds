@@ -35,13 +35,6 @@ SOURCE ATTRIBUTION
              This is the RAW/unnormalised Randers form (b_i . (y_j-y_i),
              not the unit-vector form b_i . e_ij used elsewhere in this
              project) -- see grad rho below.
-           - b_i is recomputed from the CURRENT embedding every epoch:
-                 b_i = (1/k) sum_{j in N_k(i)} N[i,j] * e_ij(Y),
-                 N = 1/2 (D_asym - D_asym^T)   (computed once, frozen)
-             i.e. N supplies the (fixed) asymmetric weighting, e_ij(Y)
-             supplies the (live) direction -- exactly mirroring how
-             finsler_mds.py's B is a live free parameter, but here it
-             has a closed-form update instead of a learned one.
            - setting b_i = 0 identically reproduces vanilla UMAP (no
              drift term at all) -- used below as a sanity check.
            - DENSE full-batch adaptation: real UMAP uses per-edge SGD
@@ -149,14 +142,24 @@ def fuzzy_simplicial_set(D: np.ndarray, k: int):
         w = np.exp(-np.maximum(0.0, knn_dist[i] - rho[i]) / sigma[i])
         A[i, knn_idx[i]] = w
 
-    #mu = A + A.T - A * A.T   # probabilistic t-conorm  [UMAP Eq. Section 3.1]
-    #np.fill_diagonal(mu, 0.0)
+    # [OURS 2026-08-14] re-enabled -- this was commented out, leaving mu as
+    # the raw asymmetric row-wise adjacency A. That silently broke
+    # spectral_layout(): np.linalg.eigh() only reads the lower triangle of
+    # its input by default, so an asymmetric mu fed into the normalised
+    # Laplacian there was throwing away half the graph's information,
+    # producing a degenerate (collapsed-onto-two-lines) spectral init
+    # instead of a meaningful one. Confirmed side-by-side against real
+    # umap-learn's own fuzzy_simplicial_set+spectral_layout on identical
+    # input: real graph was symmetric, ours wasn't, and only the symmetric
+    # one gave a coherent swiss-roll-shaped init at epoch 0.
+    mu = A + A.T - A * A.T   # probabilistic t-conorm  [UMAP Eq. Section 3.1]
+    np.fill_diagonal(mu, 0.0)
 
     knn_mask = np.zeros((n, n), dtype=bool)
     rows = np.repeat(np.arange(n), k)
     knn_mask[rows, knn_idx.ravel()] = True
 
-    return A, knn_mask
+    return mu, knn_mask
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -205,6 +208,53 @@ def spectral_layout(mu: np.ndarray, d: int, seed: int = 0) -> np.ndarray:
     Y = Y + rng.normal(scale=1e-4, size=Y.shape)
 
     # rescale to a sane initial extent (UMAP scales spectral init to ~10)
+    Y = 10.0 * Y / (np.abs(Y).max() + 1e-12)
+    return Y
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3b. Classical/Torgerson MDS initialisation  [Isomap's own finishing step]
+# ─────────────────────────────────────────────────────────────────────────────
+def classical_mds(D: np.ndarray, d: int, seed: int = 0) -> np.ndarray:
+    """
+    [OURS 2026-08-16, per explicit user request] Classical/Torgerson MDS:
+    eigendecompose the double-centered squared distance matrix,
+    Y = U * sqrt(v). This is Isomap's OWN finishing step (confirmed via the
+    IsUMap paper's own words this session: "when we forgo local
+    modifications... our approach essentially becomes an implementation of
+    the Isomap algorithm" -- and sklearn's Isomap._fit_transform: k-NN +
+    Dijkstra geodesics, then KernelPCA(kernel="precomputed") on
+    -0.5*dist_matrix**2, which is exactly this).
+
+    Alternative to spectral_layout() for run_located_drift's locate step
+    (--init-method isomap): D is already built Isomap-style (k-NN +
+    Dijkstra via randers_bridge.compute_dist_matrix, fully dense/complete
+    -- no sparse/inf issue like isumap's data_D), so this makes the WHOLE
+    pipeline consistently Isomap (distances AND embedding), not just the
+    distance construction. Motivated by this session's empirical finding
+    that spectral/force-directed init tends to fragment this kind of
+    geodesic-distance data, while Isomap-style classical MDS is
+    specifically known (Tenenbaum et al. 2000) to unroll a swiss roll
+    cleanly, and DAGES's own Isomap init (checked directly this session)
+    was clean/non-fragmented.
+
+    Requires D to be dense/complete -- unlike spectral_layout, which
+    tolerates a sparse fuzzy graph, classical MDS's double-centering sums
+    whole rows/columns, so missing/inf entries would contaminate every
+    row/column.
+    """
+    n = D.shape[0]
+    D2 = D ** 2
+    J = np.eye(n) - np.ones((n, n)) / n
+    B = -0.5 * J @ D2 @ J
+    vals, vecs = np.linalg.eigh(B)
+    idx = np.argsort(vals)[::-1][:d]
+    vals_d = np.clip(vals[idx], 0.0, None)
+    Y = vecs[:, idx] * np.sqrt(vals_d)[None, :]
+
+    # match spectral_layout's scale convention (UMAP scales its own init to
+    # ~10) so downstream min_dist/spread-tuned force-directed training sees
+    # a comparable starting extent regardless of which init method was used
     Y = 10.0 * Y / (np.abs(Y).max() + 1e-12)
     return Y
 
@@ -558,6 +608,53 @@ def alignment(Y: np.ndarray, Y_baseline: np.ndarray, B: np.ndarray) -> float:
         return float("nan")
     cos = (disp[valid] * B[valid]).sum(1) / (disp_norm[valid, 0] * b_norm[valid, 0])
     return float(cos.mean())
+
+
+def procrustes_align(X: np.ndarray, Y: np.ndarray):
+    """
+    [OURS 2026-08-14, per UMAP paper Section 5.3 "Embedding Stability"]
+    Optimal translation + uniform scaling + rotation of Y onto X, where X
+    and Y are (n,d) point sets with a known correspondence (point i in X
+    <-> point i in Y) -- e.g. the same n_sub real points, embedded once as
+    part of a larger n_full run (X) and once as a standalone n_sub run (Y).
+
+    Procedure (orthogonal Procrustes, same recipe the paper describes):
+      1. Center both point sets on their own centroid.
+      2. Find the optimal ROTATION R (via SVD of Y_c^T X_c) that best
+         aligns Y_c onto X_c -- this is the classic orthogonal Procrustes
+         solution, minimising ||X_c - Y_c R||^2 over rotations R.
+      3. Find the optimal uniform SCALE s that minimises ||X_c - s*(Y_c R)||^2
+         (closed form: s = <X_c, Y_c R> / ||Y_c R||^2).
+      4. Re-add X's centroid (translation) to get Y_aligned.
+      5. Report the residual RMS distance, normalised by X's own average
+         point-norm about its centroid -- a scale-free number, comparable
+         across runs/datasets, matching the paper's own normalisation
+         ("dividing by the average norm of the embedded dataset").
+
+    Returns
+    -------
+    Y_aligned : (n,d) -- Y after the optimal translation/scale/rotation
+    distance  : float -- normalised Procrustes distance, 0 = identical shape
+    """
+    X = np.asarray(X, dtype=np.float64)
+    Y = np.asarray(Y, dtype=np.float64)
+    X_mean = X.mean(axis=0)
+    Xc = X - X_mean
+    Yc = Y - Y.mean(axis=0)
+
+    U, _, Vt = np.linalg.svd(Yc.T @ Xc)
+    R = U @ Vt                                    # optimal rotation
+
+    Y_rot = Yc @ R
+    denom = float((Y_rot ** 2).sum())
+    s = float((Xc * Y_rot).sum() / denom) if denom > 1e-12 else 1.0  # optimal scale
+
+    Y_aligned = s * Y_rot + X_mean
+
+    resid = np.linalg.norm(X - Y_aligned, axis=1)
+    norm = float(np.linalg.norm(Xc, axis=1).mean()) + 1e-12
+    distance = float(np.sqrt((resid ** 2).mean()) / norm)
+    return Y_aligned, distance
 
 
 if __name__ == "__main__":
