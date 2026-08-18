@@ -11,8 +11,7 @@ drift (B) initialised via the "locate the target, then attach" method.
         attached (B_fixed) -- only a_i (the real point's own position)
         trains each epoch, b_i never changes
 
-    [OURS 2026-08-16, per explicit user request] the locate step used to
-    train the augmented real+virtual system for locate_epochs (default 500)
+    the locate step used to train the augmented real+virtual system for locate_epochs (default 500)
     iterations of full force-directed randers_umap_fit before reading off
     B := Y_virtual - Y_real. That entangles B with the stochastic
     optimisation dynamics (negative sampling, attraction/repulsion) of an
@@ -92,6 +91,7 @@ def make_swiss_roll_randers(n, seed=42):
 
 def run_located_drift(X, omega, k=15, emb_k=20, neg=10, locate_epochs=500,
                       epochs=500, clip_delta=0.01, use_gravity=False,
+                      gravity_strength=1.0, gravity_neighbor_weight=True,
                       snapshot_every=None, ramp=False, seed=0, verbose=True,
                       apply_step=True, init_method="umap"):
     """
@@ -189,7 +189,8 @@ def run_located_drift(X, omega, k=15, emb_k=20, neg=10, locate_epochs=500,
     out2 = randers_umap_fit(D_asym, n_neighbors=emb_k, n_negative_samples=neg,
                             n_epochs=epochs, use_drift=True,
                             B_fixed=B_located, Y_init_override=Y_real0,
-                            use_gravity=use_gravity, ramp=ramp,
+                            use_gravity=use_gravity, gravity_strength=gravity_strength,
+                            gravity_neighbor_weight=gravity_neighbor_weight, ramp=ramp,
                             snapshot_every=snapshot_every,
                             clip_delta=clip_delta, seed=seed, verbose=verbose)
     Y, B = out2["Y"], out2["B"]
@@ -218,7 +219,16 @@ def main():
                          "spectral_layout call, no training. Kept for compat.")
     p.add_argument("--clip-delta", type=float, default=0.01)
     p.add_argument("--gravity", action="store_true",
-                    help="add per-node gravity = b_i to the apply step (no extra scaling)")
+                    help="[OURS 2026-08-17] add per-node gravity toward xi_i=y_i+b_i "
+                         "(Bannister et al. f_g=gamma*M[i]*b_i), weighted by "
+                         "--gravity-neighbor-weight unless disabled.")
+    p.add_argument("--gravity-strength", type=float, default=1.0,
+                    help="[OURS 2026-08-17] gamma_t in Bannister et al.'s gravity force. "
+                         "Only matters with --gravity.")
+    p.add_argument("--no-gravity-neighbor-weight", action="store_true",
+                    help="[OURS 2026-08-17] disable the neighbour-plausibility weighting "
+                         "(revert to the old unconditional gravity pull). Only matters with "
+                         "--gravity.")
     p.add_argument("--snapshot-every", type=int, default=None,
                     help="if given, also save <out>_snapshots.png: the apply-step "
                          "embedding every N epochs (from Y_real0 to final), side by side")
@@ -272,6 +282,8 @@ def main():
     result = run_located_drift(X, omega, k=args.k, emb_k=args.emb_k, neg=args.neg,
                                locate_epochs=args.locate_epochs, epochs=args.epochs,
                                clip_delta=args.clip_delta, use_gravity=args.gravity,
+                               gravity_strength=args.gravity_strength,
+                               gravity_neighbor_weight=not args.no_gravity_neighbor_weight,
                                snapshot_every=args.snapshot_every, ramp=args.ramp,
                                seed=args.seed, verbose=not args.quiet,
                                apply_step=not args.init_only, init_method=args.init_method)

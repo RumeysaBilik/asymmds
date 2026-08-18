@@ -217,7 +217,7 @@ def spectral_layout(mu: np.ndarray, d: int, seed: int = 0) -> np.ndarray:
 # ─────────────────────────────────────────────────────────────────────────────
 def classical_mds(D: np.ndarray, d: int, seed: int = 0) -> np.ndarray:
     """
-    [OURS 2026-08-16, per explicit user request] Classical/Torgerson MDS:
+    Classical/Torgerson MDS:
     eigendecompose the double-centered squared distance matrix,
     Y = U * sqrt(v). This is Isomap's OWN finishing step (confirmed via the
     IsUMap paper's own words this session: "when we forgo local
@@ -307,6 +307,8 @@ def randers_umap_fit(
     Y_init_override: np.ndarray = None,
     use_gravity: bool = False,
     node_mass: np.ndarray = None,
+    gravity_strength: float = 1.0,
+    gravity_neighbor_weight: bool = True,
     norm_mode: str = "relative",
     ramp: bool = True,
     snapshot_every: int = None,
@@ -361,29 +363,77 @@ def randers_umap_fit(
         force-directed loop only has to find the right LOCAL offset, not
         travel cross-embedding first.
 
-    use_gravity : [OURS 2026-08-06] bool, default False (disabled, reproduces
-        prior behaviour exactly). If True, an extra SEPARATE additive force
-        pulls each node i toward its own per-node target xi_i = y_i + b_i
-        (Bannister et al.'s social-gravity force, arXiv:1209.0748, adapted to a
-        per-node target instead of one shared center). Since xi_i - y_i = b_i
-        by construction, this force IS M[i] * b_i -- no extra tuned scalar
-        multiplies it (deliberately: the whole point of the located-drift
-        construction is that b_i's magnitude is already meaningful, not a free
-        parameter to guess). Added to the net UMAP force each epoch (before
-        grad_clip). Does not change how rho/g/B are computed above -- B is a
-        fixed source for this term, no gradient flows back onto B from it.
-        This idea (a per-node gravity pull equal to the node's own drift
-        vector) was previously tried on finsler_mds.py's free-B model with an
-        extra tuned gamma multiplier (see Gravity_Report.tex): once that
+    use_gravity : [OURS 2026-08-06, reworked 2026-08-17 per explicit user
+        request] bool, default False (disabled, reproduces prior behaviour
+        exactly). If True, an extra SEPARATE additive force pulls each node i
+        toward its own per-node target xi_i = y_i + b_i -- Bannister et al.'s
+        social-gravity force (arXiv:1209.0748):
+
+            f_g(v) = gamma_t * M[v] * (xi - P[v])
+
+        adapted to a per-node target xi_i instead of one shared center.
+        Since xi_i - y_i = b_i by construction, this collapses to
+        f_g(i) = gamma * M[i] * b_i -- see gravity_strength below for gamma_t,
+        and gravity_neighbor_weight for the second 2026-08-17 change.
+
+        [OURS 2026-08-17, per explicit user request] Previously this force
+        was applied UNCONDITIONALLY at every epoch, regardless of whether
+        ||b_i|| was small (a plausible, nearby target) or large (an implausible
+        one relative to i's actual local neighbour scale) -- a constant push
+        with no relation to UMAP's own attraction curve, which weakens as
+        points get close. The user's proposed fix: treat the virtual point
+        xi_i as a genuine k-NN CANDIDATE for node i, so gravity only pulls
+        with real strength when xi_i would plausibly BE one of i's neighbours
+        -- if b_i is small enough (relative to i's current real neighbour
+        distances) to look like an actual nearby point, the pull is strong;
+        if b_i is large (implausible drift), the pull fades toward zero,
+        exactly like a UMAP edge weight decays for a distant point. See
+        gravity_neighbor_weight below for the exact mechanism.
+
+        This whole idea (a per-node gravity pull equal to the node's own
+        drift vector, unconditional, gamma tunable) was previously tried on
+        finsler_mds.py's free-B model (see Gravity_Report.tex): once that
         model's B-init bug was fixed, no gamma>0 showed a measurable benefit
-        over the gamma=0 baseline. Being tried again here, without the gamma
-        knob, because this is a structurally different force basis (UMAP's
-        Phi-curve vs. plain Adam-optimised distance-fit loss) -- the earlier
-        null result is not assumed to carry over automatically.
+        over the gamma=0 baseline there. Per explicit user instruction
+        (2026-08-17), that earlier null result is NOT treated as a reason to
+        skip re-testing here -- this is a structurally different force basis
+        (UMAP's Phi-curve vs. plain Adam-optimised distance-fit loss) AND a
+        structurally different force (neighbour-weighted, not unconditional),
+        so the earlier result does not obviously carry over.
+
+    gravity_strength : [OURS 2026-08-17, per explicit user request] float,
+        default 1.0. This IS gamma_t from Bannister et al.'s formula above --
+        previously absent entirely (force was hardcoded to exactly M[i]*b_i,
+        gamma implicitly 1, no separate knob). Now an explicit, sweepable
+        multiplier, matching the paper's own notation. Only has any effect
+        when use_gravity=True.
+
+    gravity_neighbor_weight : [OURS 2026-08-17, per explicit user request]
+        bool, default True. If True, the gravity force on node i is scaled by
+        a per-node weight w_i, computed as an UMAP-style exponential
+        membership weight --
+        NOT the k-NN augmentation itself (no extra points added to the
+        system, no extra O(n^2) cost), just a per-node scalar computed each
+        epoch from the CURRENT embedding:
+
+            rho_i   = i's own nearest real-neighbour distance in Y (this epoch)
+            sigma_i = local scale estimate (mean of i's k nearest real
+                      neighbour distances in Y, minus rho_i)
+            w_i     = exp(-max(0, ||b_i|| - rho_i) / sigma_i)
+
+        This is the exact same smooth_knn_dist-style decay UMAP uses to turn
+        a raw distance into an edge weight (Section 3.1) -- here applied to
+        ||b_i|| (the fixed distance from y_i to its own virtual target xi_i)
+        against i's LIVE local neighbourhood scale, so w_i in (0,1] answers
+        "how plausible is it that xi_i is actually one of i's neighbours,
+        right now, in the current embedding". If False, w_i=1 always (the
+        old unconditional behaviour). sigma_i uses a cheap mean-based
+        estimate rather than full binary-search calibration (recomputing the
+        exact smooth_knn_dist calibration for every node every epoch would be
+        the dominant cost of the whole loop).
 
     node_mass : [OURS 2026-08-06] (n,) per-node mass M[i], used only if
-        use_gravity=True. None (default) uses M[i]=1 for all nodes (uniform),
-        i.e. the gravity force is then exactly b_i, unscaled.
+        use_gravity=True. None (default) uses M[i]=1 for all nodes (uniform).
 
     drift_mode : "knn" (adopted, report's verdict) -- b_i = (1/k) sum over
                  j in N_k(i) only, i.e. same k restricted neighbour set
@@ -490,7 +540,8 @@ def randers_umap_fit(
 
     if verbose:
         mode_str = "B_fixed (frozen)" if B_fixed is not None else f"use_drift={use_drift}"
-        grav_str = "  +gravity(=b_i)" if use_gravity else ""
+        grav_str = (f"  +gravity(gamma={gravity_strength}, "
+                    f"nbr_weight={gravity_neighbor_weight})" if use_gravity else "")
         print(f"\n-- Randers-UMAP (Part A)  n={n} d={d} k={n_neighbors}  {mode_str}{grav_str} --")
         print(f"   a={a:.4f} b={b_param:.4f}  (min_dist={min_dist}, spread={spread})")
 
@@ -536,15 +587,32 @@ def randers_umap_fit(
 
         step = force.sum(axis=1)                              # (n,d) net force on y_i
 
-        # [OURS 2026-08-06] per-node gravity -- separate additive force, ported
-        # from finsler_mds.py's gravity experiment (Gravity_Report.tex), but
-        # WITHOUT that experiment's extra tuned gamma multiplier: the force is
-        # exactly M[i]*b_i, b_i's own magnitude carries the strength. Pulls
-        # y_i toward xi_i = y_i + b_i; since xi_i - y_i = b_i by construction,
-        # this collapses to M[i] * b_i. Does NOT touch rho/g/B above -- B is a
-        # fixed source for this term (no gradient flows back onto B).
+        # [OURS 2026-08-06, reworked 2026-08-17 per explicit user request]
+        # per-node gravity -- separate additive force, ported from
+        # finsler_mds.py's gravity experiment (Gravity_Report.tex). Pulls y_i
+        # toward xi_i = y_i + b_i; since xi_i - y_i = b_i by construction,
+        # Bannister et al.'s f_g(v) = gamma_t*M[v]*(xi-P[v]) collapses to
+        # gamma * M[i] * b_i. Does NOT touch rho/g/B above -- B is a fixed
+        # source for this term (no gradient flows back onto B).
         if use_gravity:
-            step = step + M[:, np.newaxis] * B
+            if gravity_neighbor_weight:
+                # [OURS 2026-08-17] "is xi_i plausibly one of i's real
+                # neighbours right now" weight -- reuses d_mat (already
+                # computed above, this epoch's live pairwise Y distances).
+                # Cheap mean-based local-scale estimate (NOT the full
+                # smooth_knn_dist binary search -- redoing that per-node,
+                # per-epoch, would dominate the loop's runtime).
+                k_local = min(n_neighbors, n - 1)
+                d_self_excl = d_mat.copy()
+                np.fill_diagonal(d_self_excl, np.inf)
+                nearest_k = np.partition(d_self_excl, k_local - 1, axis=1)[:, :k_local]
+                rho_local = nearest_k.min(axis=1)
+                sigma_local = np.maximum(nearest_k.mean(axis=1) - rho_local, 1e-6)
+                bnorm = np.linalg.norm(B, axis=1)
+                w_grav = np.exp(-np.maximum(0.0, bnorm - rho_local) / sigma_local)
+            else:
+                w_grav = np.ones(n)
+            step = step + gravity_strength * w_grav[:, np.newaxis] * M[:, np.newaxis] * B
 
         step = np.clip(step, -grad_clip, grad_clip)
 

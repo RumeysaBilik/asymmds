@@ -102,7 +102,11 @@ def main():
                     help="no-op -- locate step is a single deterministic placement call, no "
                          "training. Kept for compat with run_swiss_roll.py's run_located_drift signature.")
     p.add_argument("--clip-delta", type=float, default=0.01)
-    p.add_argument("--gravity", action="store_true")
+    p.add_argument("--gravity", action="store_true",
+                    help="[OURS 2026-08-17] add per-node gravity toward xi_i=y_i+b_i "
+                         "(Bannister et al. f_g=gamma*M[i]*b_i).")
+    p.add_argument("--gravity-strength", type=float, default=1.0)
+    p.add_argument("--no-gravity-neighbor-weight", action="store_true")
     p.add_argument("--snapshot-every", type=int, default=None)
     p.add_argument("--ramp", action="store_true")
     p.add_argument("--init-only", action="store_true")
@@ -144,6 +148,8 @@ def main():
                                locate_epochs=args.locate_epochs, epochs=args.epochs,
                                clip_delta=args.clip_delta, use_gravity=args.gravity,
                                snapshot_every=args.snapshot_every, ramp=args.ramp,
+                               gravity_strength=args.gravity_strength,
+                               gravity_neighbor_weight=not args.no_gravity_neighbor_weight,
                                seed=args.seed, verbose=not args.quiet,
                                apply_step=not args.init_only, init_method=args.init_method)
     Y, B = result["Y"], result["B"]

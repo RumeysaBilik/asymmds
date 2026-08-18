@@ -40,7 +40,11 @@ def main():
     p.add_argument("--emb-k", type=int, default=20, help="n_neighbors for randers_umap_fit (apply step)")
     p.add_argument("--neg", type=int, default=10)
     p.add_argument("--epochs", type=int, default=500)
-    p.add_argument("--gravity", action="store_true")
+    p.add_argument("--gravity", action="store_true",
+                    help="[OURS 2026-08-17] add per-node gravity toward xi_i=y_i+b_i "
+                         "(Bannister et al. f_g=gamma*M[i]*b_i).")
+    p.add_argument("--gravity-strength", type=float, default=1.0)
+    p.add_argument("--no-gravity-neighbor-weight", action="store_true")
     p.add_argument("--locate-k", type=int, default=15,
                     help="k-NN for the locate step's isumap-native geodesic backbone")
     p.add_argument("--locate-epochs", type=int, default=500,
@@ -82,7 +86,9 @@ def main():
     out = randers_umap_fit(D_asym, n_neighbors=emb_k, n_negative_samples=args.neg,
                             n_epochs=apply_epochs, use_drift=True, B_fixed=B_fixed,
                             clip_delta=args.clip_delta,
-                            use_gravity=args.gravity, ramp=args.ramp, seed=args.seed,
+                            use_gravity=args.gravity, gravity_strength=args.gravity_strength,
+                            gravity_neighbor_weight=not args.no_gravity_neighbor_weight,
+                            ramp=args.ramp, seed=args.seed,
                             snapshot_every=apply_snapshot_every, verbose=not args.quiet)
 
     if args.init_only:
