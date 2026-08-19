@@ -110,10 +110,11 @@ def main():
     p.add_argument("--snapshot-every", type=int, default=None)
     p.add_argument("--ramp", action="store_true")
     p.add_argument("--init-only", action="store_true")
-    p.add_argument("--init-method", choices=["umap", "isomap"], default="umap",
-                    help="[OURS 2026-08-16] locate step's placement method. 'umap' (default) "
-                         "= fuzzy_simplicial_set+spectral_layout. 'isomap' = classical_mds "
-                         "(Isomap's own finishing step).")
+    p.add_argument("--init-method", choices=["umap", "isomap"], default="isomap",
+                    help="[OURS 2026-08-16, default changed to 'isomap' 2026-08-18 per explicit "
+                         "user request] locate step's placement method. 'isomap' (default) = "
+                         "classical_mds (Isomap's own finishing step). 'umap' = "
+                         "fuzzy_simplicial_set+spectral_layout.")
     p.add_argument("--alpha", type=float, default=0.5, help="max ||omega|| for the mammoth drift field")
     p.add_argument("--seed",   type=int, default=0)
     p.add_argument("--out",    default="mammoth_embedding")
@@ -143,6 +144,40 @@ def main():
     fig3d.savefig(f"{args.out}_3d_field.png", dpi=150)
     if not args.quiet:
         print(f"wrote {args.out}_3d_field.png")
+
+    # [OURS 2026-08-19, per explicit user request] 3D plot of the initial
+    # data with the drift ATTACHED -- i.e. the "virtual" cloud X+omega,
+    # the actual point each x_i's drift vector points to (same X_virtual
+    # concept used everywhere else in this project, e.g. the old
+    # virtual-point locate mechanism). ||omega_i|| is only 0.2-0.5 while X
+    # itself spans hundreds of units, so X+omega at TRUE scale would sit
+    # visually on top of X, indistinguishable -- exaggerated by the SAME
+    # factor (scale3d=12) already used for the quiver arrows above, purely
+    # for this visualisation, so the two plots agree on what "the arrows"
+    # mean. This does NOT touch the true omega used anywhere downstream
+    # (locate step, D_asym, etc.) -- display-only.
+    # [OURS 2026-08-19, per explicit user request -- "direkt driftleri kırmızı
+    # ok olarak çizsin"] drawn as crimson quiver arrows FROM each x_i TO its
+    # attached virtual point x_i+omega_i, same subsample/style as the field
+    # plot above, rather than (or in addition to) two overlaid clouds.
+    X_virtual_display = X + omega * scale3d
+    fig3d_v = plt.figure(figsize=(11, 9))
+    ax3d_v = fig3d_v.add_subplot(111, projection="3d")
+    sc3d_v = ax3d_v.scatter(X[:, 0], X[:, 1], X[:, 2], c=z, cmap="viridis", s=8,
+                             alpha=0.85, linewidths=0)
+    fig3d_v.colorbar(sc3d_v, ax=ax3d_v, label="z (tail<->head)", shrink=0.6, pad=0.08)
+    ax3d_v.quiver(X[idx3d, 0], X[idx3d, 1], X[idx3d, 2],
+                  X_virtual_display[idx3d, 0] - X[idx3d, 0],
+                  X_virtual_display[idx3d, 1] - X[idx3d, 1],
+                  X_virtual_display[idx3d, 2] - X[idx3d, 2],
+                  color="crimson", alpha=0.9, linewidth=1.2, arrow_length_ratio=0.25)
+    ax3d_v.set_title(f"Mammoth: drift attached (x_i -> x_i+omega_i) "
+                      f"(n={n}, omega exaggerated x{scale3d:.0f} for visibility)", fontsize=10)
+    ax3d_v.set_xlabel("x"); ax3d_v.set_ylabel("y (height)"); ax3d_v.set_zlabel("z (tail<->head)")
+    fig3d_v.tight_layout()
+    fig3d_v.savefig(f"{args.out}_3d_drift_attached.png", dpi=150)
+    if not args.quiet:
+        print(f"wrote {args.out}_3d_drift_attached.png")
 
     result = run_located_drift(X, omega, k=args.k, emb_k=args.emb_k, neg=args.neg,
                                locate_epochs=args.locate_epochs, epochs=args.epochs,

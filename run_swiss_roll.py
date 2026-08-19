@@ -93,7 +93,7 @@ def run_located_drift(X, omega, k=15, emb_k=20, neg=10, locate_epochs=500,
                       epochs=500, clip_delta=0.01, use_gravity=False,
                       gravity_strength=1.0, gravity_neighbor_weight=True,
                       snapshot_every=None, ramp=False, seed=0, verbose=True,
-                      apply_step=True, init_method="umap"):
+                      apply_step=True, init_method="isomap"):
     """
     The full two-step pipeline, factored out so both main() (CLI/plotting)
     and test.py (diagnostics) call the exact same code -- no duplication.
@@ -245,11 +245,12 @@ def main():
                          "the raw located embedding (Y_real0) with its drift vectors "
                          "(B_located). Ignores --epochs, --ramp, --gravity, "
                          "--snapshot-every (there's no training loop to snapshot).")
-    p.add_argument("--init-method", choices=["umap", "isomap"], default="umap",
-                    help="[OURS 2026-08-16] locate step's placement method. 'umap' (default) "
-                         "= fuzzy_simplicial_set+spectral_layout. 'isomap' = classical_mds "
-                         "(Isomap's own finishing step) -- makes the whole pipeline "
-                         "consistently Isomap-style, not just the distance construction.")
+    p.add_argument("--init-method", choices=["umap", "isomap"], default="isomap",
+                    help="[OURS 2026-08-16, default changed to 'isomap' 2026-08-18 per explicit "
+                         "user request] locate step's placement method. 'isomap' (default) = "
+                         "classical_mds (Isomap's own finishing step) -- makes the whole pipeline "
+                         "consistently Isomap-style, not just the distance construction. 'umap' = "
+                         "fuzzy_simplicial_set+spectral_layout.")
     p.add_argument("--seed",   type=int, default=0)
     p.add_argument("--out",    default="swiss_embedding")
     p.add_argument("--quiet",  action="store_true")

@@ -1,14 +1,32 @@
 #!/usr/bin/env python3
 """
-run_mammoth_isumap.py -- isumap-derived D_asym + located drift, on the
+run_mammoth_isumap.py -- isumap-derived D_asym + live-derived drift, on the
 mammoth point cloud. EXACT SAME pipeline as run_swiss_roll_isumap.py
-(build_isumap_dist_matrix, locate_B_isumap, both imported directly, not
-duplicated) -- only the dataset changes, per explicit user request
-("sadece data setini değiştirelim").
+(build_isumap_dist_matrix imported directly, not duplicated) -- only the
+dataset changes, per explicit user request ("sadece data setini
+değiştirelim").
 
 See run_mammoth.py's module docstring for the mammoth Randers-field
 rationale (hand-crafted global-axis field, DAGES river/sea style -- no
 paper precedent exists for this dataset, neither IsUMap's nor DAGES's).
+
+[OURS 2026-08-18, per explicit user/advisor feedback, then reconciled per a
+second explicit user request -- see run_swiss_roll_isumap.py's module
+docstring for the full rationale, especially locate_B_from_D_asym()'s
+docstring] B is no longer located via virtual points that peeked at the
+mammoth's true omega field. Instead, B originates ENTIRELY from D_asym's
+own asymmetry (compute_drift on N = (D_asym-D_asym.T)/(D_asym+D_asym.T),
+no omega anywhere in that formula), but -- unlike a first attempt at this
+fix -- it is NOT recomputed every epoch. It is computed ONCE, on the
+untrained Y_init (spectral_layout on D_asym's own fuzzy graph), then frozen
+and attached to each node for the whole apply-step training, exactly like
+the old virtual-point mechanism used to do (just sourced from D_asym's
+asymmetry instead of from omega). omega is only used to build the
+mammoth's ambient point cloud + drift field in make_mammoth_randers(); it
+is never read again after that (D_asym here comes from
+distance_graph_generation, which has no randers_field parameter at all --
+its asymmetry is purely the directed k-NN/star-graph structure of X, not
+an injected vector field).
 
 Usage
 -----
@@ -29,7 +47,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 from run_mammoth import make_mammoth_randers
-from run_swiss_roll_isumap import build_isumap_dist_matrix, locate_B_isumap
+from run_swiss_roll_isumap import build_isumap_dist_matrix, locate_B_from_D_asym
 from randers_umap import randers_umap_fit
 
 
@@ -45,10 +63,6 @@ def main():
                          "(Bannister et al. f_g=gamma*M[i]*b_i).")
     p.add_argument("--gravity-strength", type=float, default=1.0)
     p.add_argument("--no-gravity-neighbor-weight", action="store_true")
-    p.add_argument("--locate-k", type=int, default=15,
-                    help="k-NN for the locate step's isumap-native geodesic backbone")
-    p.add_argument("--locate-epochs", type=int, default=500,
-                    help="no-op -- locate step is a single spectral_layout call, no training")
     p.add_argument("--clip-delta", type=float, default=0.01)
     p.add_argument("--ramp", action="store_true")
     p.add_argument("--init-only", action="store_true",
@@ -78,11 +92,14 @@ def main():
         print(f"D_asym: {D_asym.shape}  symmetric={np.allclose(D_asym, D_asym.T)}  "
               f"min real neighbours/row={min_real_neighbors}  emb_k used={emb_k}")
 
+    # [OURS 2026-08-18, per explicit user request -- see
+    # locate_B_from_D_asym's docstring in run_swiss_roll_isumap.py] B is
+    # derived purely from D_asym's own asymmetry (no omega), computed ONCE
+    # on the untrained Y_init and frozen -- not recomputed every epoch.
     if not args.quiet:
-        print(f"\nLocating B via virtual points (true omega, isumap-native locate backbone)...")
-    B_fixed = locate_B_isumap(X, omega, k=args.locate_k, emb_k=args.emb_k, neg=args.neg,
-                               locate_epochs=args.locate_epochs, clip_delta=args.clip_delta,
-                               seed=args.seed, verbose=not args.quiet)
+        print(f"\nLocating B from D_asym's own asymmetry (no omega, single frozen calculation)...")
+    B_fixed = locate_B_from_D_asym(D_asym, emb_k, clip_delta=args.clip_delta,
+                                    seed=args.seed, verbose=not args.quiet)
     out = randers_umap_fit(D_asym, n_neighbors=emb_k, n_negative_samples=args.neg,
                             n_epochs=apply_epochs, use_drift=True, B_fixed=B_fixed,
                             clip_delta=args.clip_delta,
@@ -109,7 +126,7 @@ def main():
                   color="k", alpha=0.6, width=0.004, scale=1, scale_units="xy")
 
     ax.set_xticks([]); ax.set_yticks([])
-    drift_label = "located B (true omega)"
+    drift_label = "located B (from D_asym asymmetry only, frozen)"
     init_suffix = ", INIT ONLY (no training)" if args.init_only else ""
     ax.set_title(f"Randers-UMAP mammoth, isumap-derived D, {drift_label}{init_suffix}  (n={args.n})", fontsize=11)
     fig.tight_layout()

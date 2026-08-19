@@ -18,50 +18,58 @@ not from an injected vector field. That part is unchanged and is the whole
 point of comparison: how does isumap's own asymmetric graph behave under
 the shared force-directed update.
 
-BUT this is a synthetic validation dataset, so the true omega field IS available to us
-even though isumap's own algorithm never looks at it. There's no reason to withhold it
-just because isumap's D_asym construction doesn't use it -- B's source is a
-separate, decoupled question from how D_asym is built. B is therefore
-computed with the SAME virtual-point locate mechanism as run_swiss_roll.py
-and run_swiss_roll_svd_radar.py:
+[OURS 2026-08-18, per explicit user/advisor feedback -- "iki drift
+mekanizması çakışıyor"] B's source was changed AGAIN, this time to remove
+a genuine methodological conflict, not just for style. Every earlier
+version of this file (see git history) located B via a virtual-point
+mechanism that peeked at the TRUE omega field directly (X_virtual =
+X + omega, embedded once via spectral_layout, B := y_virtual - y_real).
+That meant two independent channels carried the same underlying drift
+information into the pipeline at once: (1) D_asym itself, whose asymmetry
+already encodes omega (baked in by distance_graph_generation), and (2) the
+separately-located B, which peeked at omega a SECOND time via the virtual
+points. This defeats the actual point of using isumap's own asymmetric
+graph: isumap's whole premise is that drift can be inferred purely from an
+observed asymmetric dissimilarity matrix, with no privileged access to the
+ground-truth field that produced it -- exactly what a real (non-synthetic)
+application would require, since in practice you only ever observe D_asym,
+never omega itself.
 
-    [OURS 2026-08-16, per explicit user request -- this replaces an older
-    version of this paragraph that described "embed n real + n virtual
-    points jointly with plain drift-off UMAP" i.e. a full locate_epochs-
-    epoch force-directed training run before reading off B. That was
-    replaced: training entangled B with SGD optimisation noise unrelated
-    to the true x_i vs x_i+omega_i relationship. Current mechanism:]
-    place n real + n virtual (x_i+omega_i) points with ONE deterministic
-    spectral_layout call on their geodesic distance graph (no training,
-    no iterations), then B_located := y_virtual - y_real (in that single
-    placement), clipped to the Randers bound, frozen and passed as
-    B_fixed. This makes the B SOURCE identical across all three
-    pipelines -- all three now use spectral_layout-only, init-only locate.
+The fix: stop locating B via virtual points entirely -- but ALSO don't swing
+all the way to recomputing B every epoch. An earlier, separately-agreed
+design principle (from a different discussion, well before the advisor
+feedback above) was that B should be computed ONCE and FROZEN, attached to
+each node for the whole apply-step training ("ai+bi, bi sabit": a_i moves
+every epoch, b_i does not) -- the same reasoning that motivated replacing
+the old locate_epochs-epoch trained locate step with a single deterministic
+spectral_layout call in the first place. A first attempt at fixing the
+omega-double-injection problem (see git history) violated this by calling
+compute_drift() live, every epoch, on the current evolving Y -- reintroducing
+exactly the kind of SGD-entangled, non-frozen B that principle was meant to
+rule out, just from a different (omega-free) source this time. [OURS
+2026-08-18, per explicit user request -- "ikisini birleştirelim"] The two
+principles are reconciled in locate_B_from_D_asym() (defined below):
+B is derived ENTIRELY from D_asym's own asymmetry (compute_drift(N,
+knn_mask, k, Y_init, clip_delta), N = (D_asym-D_asym.T)/(D_asym+D_asym.T),
+no omega anywhere), but the compute_drift() call happens exactly ONCE, on
+Y_init (the same untrained spectral_layout initialisation randers_umap_fit
+would build internally) -- not per epoch. The result is frozen and passed
+as B_fixed, exactly like the old virtual-point mechanism used to do, just
+sourced from D_asym's asymmetry instead of from omega.
 
-This script no longer imports anything from
-run_swiss_roll_svd_radar.py or svd_radar.py -- the SVD-of-Delta B variant
-(build_fixed_B/--legacy-svd-b) is REMOVED entirely, not just unused, since
-having it sit in the file (even gated behind a flag) was a recurring
-source of confusion about what actually runs by default. The virtual-point
-locate step is now self-contained below (locate_B_isumap()) instead of
-importing locate_B() from run_swiss_roll_svd_radar.py, and it always uses
-isumap's own build_isumap_dist_matrix() for the augmented-points geodesic
-backbone (previously, even after B's source was unified across all three
-scripts, this backbone still came from randers_bridge.compute_dist_matrix
-via the imported locate_B -- that gap is closed here too, by construction,
-since locate_B_isumap has no other distance function available to it).
-Nothing in this file touches SVD anymore.
-
-[OURS 2026-08-16, per explicit user request -- "temiz ve anlaşılır bir kod
-istiyorum"] --live-drift (the old "recompute B every epoch" alternative to
-located B) is REMOVED entirely, same reasoning as the SVD variant above:
-an always-unused code path sitting behind a flag was clutter, not a real
-alternative anyone was using. located B is now the only path.
+This script no longer imports anything from run_swiss_roll_svd_radar.py or
+svd_radar.py -- the SVD-of-Delta B variant is REMOVED entirely, and the
+virtual-point locate function (locate_B_isumap, formerly defined below) is
+now also removed rather than just unused.
 
 t and alpha(t) (ground truth) are still known for swiss roll, so
 test.py's direction_accuracy_swiss metric can still be run against this
-output to see whether the isumap-derived asymmetry correlates with the
-true field -- that comparison is the point of this script.
+output to see whether the isumap-derived asymmetry (used now for BOTH
+D_asym and B) correlates with the true field -- that comparison is still
+the point of this script, but it is now an honest test of whether D_asym's
+asymmetry alone is enough to recover the true drift direction, rather than
+a test that was quietly cheating by re-injecting omega a second time
+through a separately located B.
 
 Usage
 -----
@@ -83,7 +91,7 @@ sys.path.insert(0, str(HERE))
 
 from run_swiss_roll import make_swiss_roll_randers
 from distance_graph_generation import distance_graph_generation
-from randers_umap import randers_umap_fit, fuzzy_simplicial_set, spectral_layout
+from randers_umap import randers_umap_fit, fuzzy_simplicial_set, spectral_layout, compute_drift
 
 
 def build_isumap_dist_matrix(X, k=30, verbose=True):
@@ -120,48 +128,41 @@ def build_isumap_dist_matrix(X, k=30, verbose=True):
     return D
 
 
-def locate_B_isumap(X, omega, k=15, emb_k=20, neg=10, locate_epochs=500,
-                     clip_delta=0.01, seed=0, verbose=True):
+def locate_B_from_D_asym(D_asym, emb_k, clip_delta=0.01, seed=0, verbose=True):
     """
-    [OURS 2026-08-15] Self-contained virtual-point locate step for B --
-    same mechanism as run_swiss_roll.py's run_located_drift() STEP 1, but
-    defined HERE instead of imported from run_swiss_roll_svd_radar.py -- per
-    explicit user request, this file no longer pulls anything from a
-    file named after a different (SVD-based) method. Always uses
-    build_isumap_dist_matrix() for the augmented points' geodesic
-    backbone, so this step is isumap-native end to end, same as D_asym.
+    [OURS 2026-08-18, per explicit user request -- reconciles two design
+    principles that were previously in tension] B originates ENTIRELY from
+    D_asym's own asymmetry (no omega involved anywhere -- this is the
+    advisor-driven fix from earlier the same day: isumap's whole premise is
+    that drift can be inferred purely from an observed asymmetric
+    dissimilarity matrix), but is computed ONCE and FROZEN, then attached
+    to each node for the whole apply-step training (this is the earlier,
+    separately-agreed design principle -- "ai+bi, bi sabit": a_i moves every
+    epoch, b_i does not).
 
-    [OURS 2026-08-16, per explicit user request] B is now read off a SINGLE
-    deterministic spectral_layout call on the augmented graph, not a fully
-    -trained (locate_epochs-epoch) force-directed embedding -- training the
-    augmented set entangled B with SGD optimisation noise unrelated to the
-    true x_i vs x_i+omega_i relationship. locate_epochs is now a no-op,
-    kept only for call-site/CLI compat. See run_swiss_roll.py's module
-    docstring for the full rationale.
+    Mechanism: build Y_init exactly the way randers_umap_fit would build it
+    internally (spectral_layout on D_asym's own fuzzy graph, same emb_k and
+    seed -- so this call reproduces that Y_init deterministically, no
+    Y_init_override needed downstream), then call compute_drift() ONCE on
+    this Y_init (not per-epoch/live) to get B. Contrast with the (rejected)
+    live-B mechanism this replaces, which called compute_drift() every
+    epoch on the CURRENT, evolving Y -- this version calls it exactly once,
+    on the untrained initial layout, and freezes the result.
     """
-    n = X.shape[0]
-    X_virtual = X + omega
-    X_aug = np.vstack([X, X_virtual])
+    n = D_asym.shape[0]
+    mu, knn_mask = fuzzy_simplicial_set(D_asym, emb_k)
+    Y_init = spectral_layout(mu, d=2, seed=seed)
 
-    if verbose:
-        print(f"\nLocate: building isumap-native geodesic D on {2*n} augmented points...")
-    D_sym_aug = build_isumap_dist_matrix(X_aug, k=k, verbose=False)
+    N = (D_asym - D_asym.T) / (D_asym + D_asym.T + 1e-12)
+    N = np.where(np.isfinite(N), N, 0.0)
 
-    if verbose:
-        print("Locate: spectral_layout on the augmented graph (no training)...")
-    mu_aug, _ = fuzzy_simplicial_set(D_sym_aug, emb_k)
-    Y_aug0 = spectral_layout(mu_aug, d=2, seed=seed)
-    Y_real0, Y_virtual0 = Y_aug0[:n], Y_aug0[n:]
-
-    B_located = Y_virtual0 - Y_real0
-    limit = 1.0 - clip_delta
-    bn0 = np.linalg.norm(B_located, axis=1, keepdims=True)
-    B_located = B_located * np.minimum(1.0, limit / np.maximum(bn0, 1e-12))
+    B_located = compute_drift(N, knn_mask, emb_k, Y_init, clip_delta=clip_delta)
 
     if verbose:
         bn = np.linalg.norm(B_located, axis=1)
-        print(f"B located: mean||b||={bn.mean():.4f}  max||b||={bn.max():.4f}  "
-              f"clipped={(bn >= limit - 1e-9).sum()}/{n}")
+        limit = 1.0 - clip_delta
+        print(f"B located (from D_asym asymmetry only, frozen): mean||b||={bn.mean():.4f}  "
+              f"max||b||={bn.max():.4f}  clipped={(bn >= limit - 1e-9).sum()}/{n}")
 
     return B_located
 
@@ -178,12 +179,6 @@ def main():
                          "(Bannister et al. f_g=gamma*M[i]*b_i).")
     p.add_argument("--gravity-strength", type=float, default=1.0)
     p.add_argument("--no-gravity-neighbor-weight", action="store_true")
-    p.add_argument("--locate-k", type=int, default=15,
-                    help="k-NN for the locate step's Isomap-style geodesic backbone "
-                         "(compute_dist_matrix on the augmented real+virtual points) -- "
-                         "separate from --k, which is isumap's own D_asym parameter")
-    p.add_argument("--locate-epochs", type=int, default=500,
-                    help="epochs for the virtual-point locate step (B)")
     p.add_argument("--clip-delta", type=float, default=0.01)
     p.add_argument("--ramp", action="store_true",
                     help="[OURS 2026-08-12] ramp B's magnitude 0->1 over the first 70%% of "
@@ -232,22 +227,15 @@ def main():
         print(f"D_asym: {D_asym.shape}  symmetric={np.allclose(D_asym, D_asym.T)}  "
               f"min real neighbours/row={min_real_neighbors}  emb_k used={emb_k}")
 
-    # [OURS 2026-08-13, default; self-contained since 2026-08-15] located
-    # B: SAME virtual-point mechanism as run_swiss_roll.py /
-    # run_swiss_roll_svd_radar.py, using the true omega field --
-    # available to us since this is a synthetic validation dataset,
-    # even though isumap's own D_asym construction never touches
-    # omega. locate_B_isumap() (defined above, in this file) builds
-    # its own geodesic backbone on the augmented real+virtual points
-    # via --locate-k, independent of isumap's --k, and always through
-    # build_isumap_dist_matrix -- isumap-native end to end, no import
-    # from run_swiss_roll_svd_radar.py.
+    # [OURS 2026-08-18, per explicit user request -- see locate_B_from_D_asym's
+    # docstring] B originates purely from D_asym's own asymmetry (no omega),
+    # but is computed ONCE (on the untrained Y_init) and frozen -- combines
+    # the advisor's "derive from D_asym only" requirement with the earlier
+    # "ai+bi, bi sabit" (frozen, attached) design principle.
     if not args.quiet:
-        print(f"\nLocating B via virtual points (true omega, locate-epochs={args.locate_epochs}, "
-              f"isumap-native locate backbone)...")
-    B_fixed = locate_B_isumap(X, omega, k=args.locate_k, emb_k=args.emb_k, neg=args.neg,
-                               locate_epochs=args.locate_epochs, clip_delta=args.clip_delta,
-                               seed=args.seed, verbose=not args.quiet)
+        print(f"\nLocating B from D_asym's own asymmetry (no omega, single frozen calculation)...")
+    B_fixed = locate_B_from_D_asym(D_asym, emb_k, clip_delta=args.clip_delta,
+                                    seed=args.seed, verbose=not args.quiet)
     out = randers_umap_fit(D_asym, n_neighbors=emb_k, n_negative_samples=args.neg,
                             n_epochs=apply_epochs, use_drift=True, B_fixed=B_fixed,
                             clip_delta=args.clip_delta,
@@ -275,7 +263,7 @@ def main():
                   color="k", alpha=0.6, width=0.004, scale=1, scale_units="xy")
 
     ax.set_xticks([]); ax.set_yticks([])
-    drift_label = "located B (true omega)"
+    drift_label = "located B (from D_asym asymmetry only, frozen)"
     init_suffix = ", INIT ONLY (no training)" if args.init_only else ""
     ax.set_title(f"Randers-UMAP, isumap-derived D, {drift_label}{init_suffix}  (n={args.n})", fontsize=11)
     fig.tight_layout()
