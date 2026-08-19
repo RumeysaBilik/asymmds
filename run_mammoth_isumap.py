@@ -92,16 +92,17 @@ def main():
         print(f"D_asym: {D_asym.shape}  symmetric={np.allclose(D_asym, D_asym.T)}  "
               f"min real neighbours/row={min_real_neighbors}  emb_k used={emb_k}")
 
-    # [OURS 2026-08-18, per explicit user request -- see
-    # locate_B_from_D_asym's docstring in run_swiss_roll_isumap.py] B is
-    # derived purely from D_asym's own asymmetry (no omega), computed ONCE
-    # on the untrained Y_init and frozen -- not recomputed every epoch.
+    # [OURS 2026-08-19, per explicit user request -- reverted back to the
+    # live mechanism, see run_swiss_roll_isumap.py's module docstring for
+    # the full back-and-forth] B is derived live, every epoch, purely from
+    # D_asym's own asymmetry, no omega. --init-only still shows a
+    # meaningful epoch-0 drift thanks to the 2026-08-19 fix in
+    # randers_umap.py's snapshot capture (computes the real epoch-0
+    # compute_drift(...) value instead of an all-zero placeholder).
     if not args.quiet:
-        print(f"\nLocating B from D_asym's own asymmetry (no omega, single frozen calculation)...")
-    B_fixed = locate_B_from_D_asym(D_asym, emb_k, clip_delta=args.clip_delta,
-                                    seed=args.seed, verbose=not args.quiet)
+        print(f"\nDeriving B live from D_asym's own asymmetry (no omega used) each epoch...")
     out = randers_umap_fit(D_asym, n_neighbors=emb_k, n_negative_samples=args.neg,
-                            n_epochs=apply_epochs, use_drift=True, B_fixed=B_fixed,
+                            n_epochs=apply_epochs, use_drift=True, B_fixed=None,
                             clip_delta=args.clip_delta,
                             use_gravity=args.gravity, gravity_strength=args.gravity_strength,
                             gravity_neighbor_weight=not args.no_gravity_neighbor_weight,
@@ -126,7 +127,7 @@ def main():
                   color="k", alpha=0.6, width=0.004, scale=1, scale_units="xy")
 
     ax.set_xticks([]); ax.set_yticks([])
-    drift_label = "located B (from D_asym asymmetry only, frozen)"
+    drift_label = "live B (from D_asym asymmetry only)"
     init_suffix = ", INIT ONLY (no training)" if args.init_only else ""
     ax.set_title(f"Randers-UMAP mammoth, isumap-derived D, {drift_label}{init_suffix}  (n={args.n})", fontsize=11)
     fig.tight_layout()

@@ -227,17 +227,21 @@ def main():
         print(f"D_asym: {D_asym.shape}  symmetric={np.allclose(D_asym, D_asym.T)}  "
               f"min real neighbours/row={min_real_neighbors}  emb_k used={emb_k}")
 
-    # [OURS 2026-08-18, per explicit user request -- see locate_B_from_D_asym's
-    # docstring] B originates purely from D_asym's own asymmetry (no omega),
-    # but is computed ONCE (on the untrained Y_init) and frozen -- combines
-    # the advisor's "derive from D_asym only" requirement with the earlier
-    # "ai+bi, bi sabit" (frozen, attached) design principle.
+    # [OURS 2026-08-19, per explicit user request -- reverted back to the
+    # live mechanism] B is derived live, every epoch, purely from D_asym's
+    # own asymmetry (compute_drift on N=(D_asym-D_asym.T)/(D_asym+D_asym.T),
+    # no omega anywhere) and the CURRENT embedding Y -- B_fixed=None.
+    # locate_B_from_D_asym() (still defined above) computes the same thing
+    # but ONCE and frozen; that hybrid was tried and then explicitly
+    # reverted in favour of this live version. The epoch-0 snapshot
+    # (--init-only reads this) is NOT an empty placeholder despite B_fixed
+    # being None: see the 2026-08-19 fix in randers_umap.py's snapshot
+    # capture, which computes the real epoch-0 compute_drift(...) value
+    # there specifically so --init-only still shows a meaningful drift.
     if not args.quiet:
-        print(f"\nLocating B from D_asym's own asymmetry (no omega, single frozen calculation)...")
-    B_fixed = locate_B_from_D_asym(D_asym, emb_k, clip_delta=args.clip_delta,
-                                    seed=args.seed, verbose=not args.quiet)
+        print(f"\nDeriving B live from D_asym's own asymmetry (no omega used) each epoch...")
     out = randers_umap_fit(D_asym, n_neighbors=emb_k, n_negative_samples=args.neg,
-                            n_epochs=apply_epochs, use_drift=True, B_fixed=B_fixed,
+                            n_epochs=apply_epochs, use_drift=True, B_fixed=None,
                             clip_delta=args.clip_delta,
                             use_gravity=args.gravity, gravity_strength=args.gravity_strength,
                             gravity_neighbor_weight=not args.no_gravity_neighbor_weight,
@@ -263,7 +267,7 @@ def main():
                   color="k", alpha=0.6, width=0.004, scale=1, scale_units="xy")
 
     ax.set_xticks([]); ax.set_yticks([])
-    drift_label = "located B (from D_asym asymmetry only, frozen)"
+    drift_label = "live B (from D_asym asymmetry only)"
     init_suffix = ", INIT ONLY (no training)" if args.init_only else ""
     ax.set_title(f"Randers-UMAP, isumap-derived D, {drift_label}{init_suffix}  (n={args.n})", fontsize=11)
     fig.tight_layout()

@@ -525,9 +525,29 @@ def randers_umap_fit(
     # snapshot_every: records the embedding every N epochs so the whole
     # training trajectory (init -> ... -> final) can be plotted side by
     # side. epoch 0 entry is Y_init itself (pre-training).
+    #
+    # [FIX 2026-08-19, per explicit user request] When B_fixed is None and
+    # use_drift=True (the "live" mechanism, B recomputed every epoch from
+    # N=D_asym's own asymmetry and the current Y), B here is still the
+    # np.zeros((n,d)) placeholder from line 520 -- the real B doesn't exist
+    # until the training loop's first iteration computes it. That meant
+    # --init-only (which reads exactly this epoch-0 snapshot) always showed
+    # an empty (all-zero) drift, even though a genuine "epoch 0 drift" value
+    # is well-defined and computable: it's exactly what the loop's first
+    # iteration would compute, compute_drift(N, ..., Y_init), scaled by
+    # ramp's own epoch-0 factor (0.0 if ramp=True -- ramp intentionally
+    # holds drift off initially, so zero is correct THERE -- else 1.0).
+    # This does NOT change live training itself (the loop still recomputes
+    # B fresh every epoch); it only makes the pre-loop snapshot show a
+    # meaningful value instead of a placeholder.
     snapshots = []
     if snapshot_every is not None:
-        snapshots.append({"epoch": 0, "Y": Y_init.copy(), "B": B.copy()})
+        if B_fixed is None and use_drift:
+            s0 = 0.0 if ramp else 1.0
+            B_snap0 = s0 * compute_drift(N, drift_mask, n_neighbors, Y_init, clip_delta=clip_delta)
+        else:
+            B_snap0 = B.copy()
+        snapshots.append({"epoch": 0, "Y": Y_init.copy(), "B": B_snap0})
     history = []
 
     # [OURS] expectation-matching correction for going dense instead of
