@@ -92,6 +92,7 @@ def make_swiss_roll_randers(n, seed=42):
 def run_located_drift(X, omega, k=15, emb_k=20, neg=10, locate_epochs=500,
                       epochs=500, clip_delta=0.01, use_gravity=False,
                       gravity_strength=1.0, gravity_neighbor_weight=True,
+                      use_virtual_neighbor=False,
                       snapshot_every=None, ramp=False, seed=0, verbose=True,
                       apply_step=True, init_method="isomap"):
     """
@@ -190,7 +191,8 @@ def run_located_drift(X, omega, k=15, emb_k=20, neg=10, locate_epochs=500,
                             n_epochs=epochs, use_drift=True,
                             B_fixed=B_located, Y_init_override=Y_real0,
                             use_gravity=use_gravity, gravity_strength=gravity_strength,
-                            gravity_neighbor_weight=gravity_neighbor_weight, ramp=ramp,
+                            gravity_neighbor_weight=gravity_neighbor_weight,
+                            use_virtual_neighbor=use_virtual_neighbor, ramp=ramp,
                             snapshot_every=snapshot_every,
                             clip_delta=clip_delta, seed=seed, verbose=verbose)
     Y, B = out2["Y"], out2["B"]
@@ -229,6 +231,14 @@ def main():
                     help="[OURS 2026-08-17] disable the neighbour-plausibility weighting "
                          "(revert to the old unconditional gravity pull). Only matters with "
                          "--gravity.")
+    p.add_argument("--virtual-neighbor", action="store_true",
+                    help="[OURS 2026-08-20, per explicit user request] each node's own "
+                         "virtual point xi_i=y_i+b_i is treated as an UNCONDITIONAL (k+1)-th "
+                         "attractive neighbour every epoch (mu_virtual=1.0 always, no "
+                         "plausibility gating), pulled with UMAP's OWN attraction curve "
+                         "(same attr_coeff formula as real k-NN edges, evaluated at "
+                         "rho=||b_i||) -- a different mechanism from --gravity, not a variant "
+                         "of it; both may be combined but are not expected to be in practice.")
     p.add_argument("--snapshot-every", type=int, default=None,
                     help="if given, also save <out>_snapshots.png: the apply-step "
                          "embedding every N epochs (from Y_real0 to final), side by side")
@@ -285,6 +295,7 @@ def main():
                                clip_delta=args.clip_delta, use_gravity=args.gravity,
                                gravity_strength=args.gravity_strength,
                                gravity_neighbor_weight=not args.no_gravity_neighbor_weight,
+                               use_virtual_neighbor=args.virtual_neighbor,
                                snapshot_every=args.snapshot_every, ramp=args.ramp,
                                seed=args.seed, verbose=not args.quiet,
                                apply_step=not args.init_only, init_method=args.init_method)
@@ -296,7 +307,7 @@ def main():
     plt.colorbar(sc, ax=ax, label="t (intrinsic coordinate)")
 
     bn = np.linalg.norm(B, axis=1)
-    big = np.argsort(bn)[::-1][:25]
+    big = np.argsort(bn)[::-1][:200]
     if bn.max() > 0:
         sc_scale = 0.12 * (Y.max() - Y.min()) / bn.max()
         ax.quiver(Y[big, 0], Y[big, 1], B[big, 0] * sc_scale, B[big, 1] * sc_scale,
@@ -332,7 +343,7 @@ def main():
             sc2 = ax2.scatter(Yi[:, 0], Yi[:, 1], c=t, cmap="viridis", s=6,
                               alpha=0.85, linewidths=0, vmin=vmin, vmax=vmax)
             bni = np.linalg.norm(Bi, axis=1)
-            bigi = np.argsort(bni)[::-1][:25]
+            bigi = np.argsort(bni)[::-1][:200]
             if bni.max() > 0:
                 sc_scale_i = 0.12 * (Yi.max() - Yi.min()) / bni.max()
                 ax2.quiver(Yi[bigi, 0], Yi[bigi, 1],

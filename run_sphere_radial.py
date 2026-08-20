@@ -99,6 +99,11 @@ def main():
                          "(Bannister et al. f_g=gamma*M[i]*b_i).")
     p.add_argument("--gravity-strength", type=float, default=1.0)
     p.add_argument("--no-gravity-neighbor-weight", action="store_true")
+    p.add_argument("--virtual-neighbor", action="store_true",
+                    help="[OURS 2026-08-20] each node's own virtual point xi_i=y_i+b_i is an "
+                         "unconditional (k+1)-th attractive neighbour, pulled with UMAP's own "
+                         "attraction curve -- see run_swiss_roll.py's --virtual-neighbor help "
+                         "for the full explanation (identical mechanism, reused via import).")
     p.add_argument("--snapshot-every", type=int, default=None)
     p.add_argument("--ramp", action="store_true")
     p.add_argument("--init-only", action="store_true")
@@ -164,6 +169,7 @@ def main():
                                clip_delta=args.clip_delta, use_gravity=args.gravity,
                                gravity_strength=args.gravity_strength,
                                gravity_neighbor_weight=not args.no_gravity_neighbor_weight,
+                               use_virtual_neighbor=args.virtual_neighbor,
                                snapshot_every=args.snapshot_every, ramp=args.ramp,
                                seed=args.seed, verbose=not args.quiet,
                                apply_step=not args.init_only, init_method=args.init_method)
@@ -175,7 +181,7 @@ def main():
     plt.colorbar(sc, ax=ax, label="theta (colatitude)")
 
     bn = np.linalg.norm(B, axis=1)
-    big = np.argsort(bn)[::-1][:25]
+    big = np.argsort(bn)[::-1][:200]
     if bn.max() > 0:
         sc_scale = 0.12 * (Y.max() - Y.min()) / bn.max()
         ax.quiver(Y[big, 0], Y[big, 1], B[big, 0] * sc_scale, B[big, 1] * sc_scale,
@@ -211,7 +217,7 @@ def main():
             sc2 = ax2.scatter(Yi[:, 0], Yi[:, 1], c=theta, cmap="viridis", s=6,
                               alpha=0.85, linewidths=0, vmin=vmin, vmax=vmax)
             bni = np.linalg.norm(Bi, axis=1)
-            bigi = np.argsort(bni)[::-1][:25]
+            bigi = np.argsort(bni)[::-1][:200]
             if bni.max() > 0:
                 sc_scale_i = 0.12 * (Yi.max() - Yi.min()) / bni.max()
                 ax2.quiver(Yi[bigi, 0], Yi[bigi, 1],

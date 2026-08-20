@@ -309,6 +309,7 @@ def randers_umap_fit(
     node_mass: np.ndarray = None,
     gravity_strength: float = 1.0,
     gravity_neighbor_weight: bool = True,
+    use_virtual_neighbor: bool = False,
     norm_mode: str = "relative",
     ramp: bool = True,
     snapshot_every: int = None,
@@ -434,6 +435,33 @@ def randers_umap_fit(
 
     node_mass : [OURS 2026-08-06] (n,) per-node mass M[i], used only if
         use_gravity=True. None (default) uses M[i]=1 for all nodes (uniform).
+
+    use_virtual_neighbor : [OURS 2026-08-20, per explicit user request] bool,
+        default False. A DIFFERENT mechanism from use_gravity, not a
+        variant of it -- both may be independently enabled, though they are
+        not expected to be combined in practice. Each node i's own virtual
+        point xi_i = y_i + b_i is treated as an UNCONDITIONAL (k+1)-th
+        neighbour: it always participates in the attractive force, using
+        UMAP's OWN attraction curve (the exact same attr_coeff formula real
+        k-NN edges use, built from the same (a, b_param) fit to
+        min_dist/spread) evaluated at rho_v = ||b_i|| -- NOT a separate,
+        ad-hoc force basis like gravity's gamma*M[i]*b_i, and NOT gated by
+        any plausibility/local-density weight (contrast with
+        gravity_neighbor_weight's smooth w_i in (0,1] -- here the
+        equivalent weight is always exactly 1, i.e. mu_virtual=1.0 for
+        every node, every epoch, matching how force_edges already forces
+        mu[i,j]=1.0 for a guaranteed edge elsewhere in this project):
+
+            rho_v_i       = ||b_i||
+            attr_coeff_v  = (2*a*b_param*rho_v^(2*b_param-1)) / (1 + a*rho_v^(2*b_param))
+            force_virtual_i = attr_coeff_v * b_i
+
+        No repulsive counterpart is needed (a permanent/unconditional
+        neighbour has mu=1 everywhere, so (1-mu)=0 -- exactly like
+        force_edges' guaranteed-attractive pairs). Since b_i is already the
+        direction FROM y_i TO xi_i by construction, force_virtual_i needs
+        no separate unit-vector term the way real edges' g=e_ij+b_i does.
+        Works with both frozen (B_fixed) and live (use_drift) B.
 
     drift_mode : "knn" (adopted, report's verdict) -- b_i = (1/k) sum over
                  j in N_k(i) only, i.e. same k restricted neighbour set
@@ -562,7 +590,8 @@ def randers_umap_fit(
         mode_str = "B_fixed (frozen)" if B_fixed is not None else f"use_drift={use_drift}"
         grav_str = (f"  +gravity(gamma={gravity_strength}, "
                     f"nbr_weight={gravity_neighbor_weight})" if use_gravity else "")
-        print(f"\n-- Randers-UMAP (Part A)  n={n} d={d} k={n_neighbors}  {mode_str}{grav_str} --")
+        vn_str = "  +virtual_neighbor(k+1, UMAP curve)" if use_virtual_neighbor else ""
+        print(f"\n-- Randers-UMAP (Part A)  n={n} d={d} k={n_neighbors}  {mode_str}{grav_str}{vn_str} --")
         print(f"   a={a:.4f} b={b_param:.4f}  (min_dist={min_dist}, spread={spread})")
 
     for epoch in range(n_epochs):
@@ -633,6 +662,18 @@ def randers_umap_fit(
             else:
                 w_grav = np.ones(n)
             step = step + gravity_strength * w_grav[:, np.newaxis] * M[:, np.newaxis] * B
+
+        # [OURS 2026-08-20, per explicit user request] virtual-neighbor --
+        # each node's own xi_i = y_i + b_i is an UNCONDITIONAL (k+1)-th
+        # attractive neighbour (mu_virtual=1.0 always, no plausibility
+        # gating), pulled with UMAP's OWN attraction curve instead of
+        # gravity's separate gamma*M*b_i basis. See module docstring for
+        # the exact formula and why no repulsive counterpart is needed.
+        if use_virtual_neighbor:
+            bnorm_v = np.linalg.norm(B, axis=1)
+            rho_v = np.maximum(bnorm_v, eps)
+            attr_coeff_v = (2 * a * b_param * rho_v ** (2 * b_param - 1)) / (1.0 + a * rho_v ** (2 * b_param))
+            step = step + attr_coeff_v[:, np.newaxis] * B
 
         step = np.clip(step, -grad_clip, grad_clip)
 
