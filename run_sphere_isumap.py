@@ -60,11 +60,12 @@ def main():
                          "(Bannister et al. f_g=gamma*M[i]*b_i).")
     p.add_argument("--gravity-strength", type=float, default=1.0)
     p.add_argument("--no-gravity-neighbor-weight", action="store_true")
-    p.add_argument("--virtual-neighbor", action="store_true",
-                    help="[OURS 2026-08-20] each node's own virtual point xi_i=y_i+b_i is an "
-                         "unconditional (k+1)-th attractive neighbour, pulled with UMAP's own "
-                         "attraction curve -- see randers_umap.py's use_virtual_neighbor "
-                         "docstring for the full explanation.")
+    p.add_argument("--no-virtual-neighbor", action="store_true",
+                    help="[OURS 2026-08-20, default ON] each node's own virtual point "
+                         "xi_i=y_i+b_i is, BY DEFAULT, an unconditional (k+1)-th attractive "
+                         "neighbour, pulled with UMAP's own attraction curve -- see "
+                         "randers_umap.py's use_virtual_neighbor docstring for the full "
+                         "explanation. Pass this flag to DISABLE it.")
     p.add_argument("--clip-delta", type=float, default=0.01)
     p.add_argument("--ramp", action="store_true")
     p.add_argument("--init-only", action="store_true",
@@ -100,7 +101,7 @@ def main():
                             clip_delta=args.clip_delta,
                             use_gravity=args.gravity, gravity_strength=args.gravity_strength,
                             gravity_neighbor_weight=not args.no_gravity_neighbor_weight,
-                            use_virtual_neighbor=args.virtual_neighbor,
+                            use_virtual_neighbor=not args.no_virtual_neighbor,
                             ramp=args.ramp, seed=args.seed,
                             snapshot_every=apply_snapshot_every, verbose=not args.quiet)
 

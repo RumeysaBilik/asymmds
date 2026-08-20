@@ -231,14 +231,15 @@ def main():
                     help="[OURS 2026-08-17] disable the neighbour-plausibility weighting "
                          "(revert to the old unconditional gravity pull). Only matters with "
                          "--gravity.")
-    p.add_argument("--virtual-neighbor", action="store_true",
-                    help="[OURS 2026-08-20, per explicit user request] each node's own "
-                         "virtual point xi_i=y_i+b_i is treated as an UNCONDITIONAL (k+1)-th "
-                         "attractive neighbour every epoch (mu_virtual=1.0 always, no "
-                         "plausibility gating), pulled with UMAP's OWN attraction curve "
-                         "(same attr_coeff formula as real k-NN edges, evaluated at "
-                         "rho=||b_i||) -- a different mechanism from --gravity, not a variant "
-                         "of it; both may be combined but are not expected to be in practice.")
+    p.add_argument("--no-virtual-neighbor", action="store_true",
+                    help="[OURS 2026-08-20, per explicit user request -- default changed to ON "
+                         "the same day] by default, each node's own virtual point "
+                         "xi_i=y_i+b_i is treated as an UNCONDITIONAL (k+1)-th attractive "
+                         "neighbour every epoch (mu_virtual=1.0 always, no plausibility "
+                         "gating), pulled with UMAP's OWN attraction curve (same attr_coeff "
+                         "formula as real k-NN edges, evaluated at rho=||b_i||) -- a different "
+                         "mechanism from --gravity, not a variant of it. Pass this flag to "
+                         "DISABLE it and revert to the old behaviour.")
     p.add_argument("--snapshot-every", type=int, default=None,
                     help="if given, also save <out>_snapshots.png: the apply-step "
                          "embedding every N epochs (from Y_real0 to final), side by side")
@@ -295,7 +296,7 @@ def main():
                                clip_delta=args.clip_delta, use_gravity=args.gravity,
                                gravity_strength=args.gravity_strength,
                                gravity_neighbor_weight=not args.no_gravity_neighbor_weight,
-                               use_virtual_neighbor=args.virtual_neighbor,
+                               use_virtual_neighbor=not args.no_virtual_neighbor,
                                snapshot_every=args.snapshot_every, ramp=args.ramp,
                                seed=args.seed, verbose=not args.quiet,
                                apply_step=not args.init_only, init_method=args.init_method)
